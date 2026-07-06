@@ -1,6 +1,6 @@
 # Build artifacts
 bin/
-tau
+/tau
 *.exe
 *.exe~
 *.dll
