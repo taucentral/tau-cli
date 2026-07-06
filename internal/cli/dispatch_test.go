@@ -125,7 +125,7 @@ func TestDispatch_ListModels_Succeeds(t *testing.T) {
 
 // TestDispatch_RPCMode_NoModel_Errors verifies the wire layer surfaces
 // ErrNoModel when --rpc is requested with no model configured. The
-// protocol-level RPC round-trip is exercised in internal/modes tests
+// protocol-level RPC round-trip is exercised in pkg/tau/modes tests
 // (where the stdin/stdout pipes can be injected cleanly without racing
 // on the process's real os.Stdin / os.Stdout globals).
 func TestDispatch_RPCMode_NoModel_Errors(t *testing.T) {
