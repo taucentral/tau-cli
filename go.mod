@@ -2,18 +2,12 @@ module github.com/taucentral/tau-cli
 
 go 1.25.0
 
-// Phase 4: pin to a placeholder version. The replace directive below
-// points at the local core checkout so phases 4-8 can iterate without
-// publishing. Phase 9 drops the replace and runs `go mod tidy` against
-// the published core tag (or main-branch HEAD, which Go resolves to a
-// pseudo-version of the form v0.0.0-<utc-timestamp>-<short-sha>).
-
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/taucentral/tau v0.0.0-20260706085245-48175c6bcdf0
+	github.com/taucentral/tau v0.0.0-20260706114715-9ca47123ccb0
 )
 
 require (
@@ -72,5 +66,3 @@ require (
 	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/taucentral/tau => /home/bigpod/dev/tau/tau
