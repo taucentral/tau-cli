@@ -159,6 +159,99 @@ func TestResolveChecksum_None(t *testing.T) {
 	}
 }
 
+// --- resolveGitHubLatest ---------------------------------------------------
+
+// withGithubAPIBase overrides the package-level githubAPIBase for the
+// duration of the test, restoring it on cleanup. Lets resolveGitHubLatest
+// be exercised against an httptest server without going to the network.
+func withGithubAPIBase(t *testing.T, base string) {
+	t.Helper()
+	old := githubAPIBase
+	githubAPIBase = base
+	t.Cleanup(func() { githubAPIBase = old })
+}
+
+func TestResolveGitHubLatest_404_HasHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Mirror GitHub's actual 404 payload shape so the test asserts
+		// the behavior against a realistic response.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found","documentation_url":"https://docs.github.com/rest/releases/releases#get-the-latest-release","status":"404"}`)
+	}))
+	defer srv.Close()
+	withGithubAPIBase(t, srv.URL)
+
+	_, err := resolveGitHubLatest(context.Background(), "taucentral/sdd")
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	msg := err.Error()
+	for want, why := range map[string]string{
+		"taucentral/sdd":             "should name the repo shorthand so the user knows which input failed",
+		"no published releases":      "should explain the most likely cause",
+		runtime.GOOS:                 "should name the current GOOS so the user knows what asset name to publish",
+		runtime.GOARCH:               "should name the current GOARCH for the same reason",
+		"direct HTTPS URL or local":  "should offer the two non-GitHub workarounds",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q (%s); got:\n%s", want, why, msg)
+		}
+	}
+	// The raw GitHub JSON body must NOT leak through — that was the whole
+	// point of the special-case.
+	if strings.Contains(msg, "documentation_url") {
+		t.Errorf("error leaked raw GitHub JSON; got:\n%s", msg)
+	}
+}
+
+func TestResolveGitHubLatest_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/releases/latest") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Pick an asset name that matches the current GOOS/GOARCH so the
+		// matcher selects it.
+		assetName := fmt.Sprintf("tau-plugin-sdd-%s-%s", runtime.GOOS, runtime.GOARCH)
+		assetURL := "http://download.test/" + assetName
+		fmt.Fprintf(w, `{"tag_name":"v0.1.0","assets":[{"name":%q,"browser_download_url":%q}]}`, assetName, assetURL)
+	}))
+	defer srv.Close()
+	withGithubAPIBase(t, srv.URL)
+
+	r, err := resolveGitHubLatest(context.Background(), "taucentral/sdd")
+	if err != nil {
+		t.Fatalf("resolveGitHubLatest: %v", err)
+	}
+	if r.version != "v0.1.0" {
+		t.Errorf("version = %q", r.version)
+	}
+	if want := "http://download.test/tau-plugin-sdd-" + runtime.GOOS + "-" + runtime.GOARCH; r.downloadURL != want {
+		t.Errorf("downloadURL = %q, want %q", r.downloadURL, want)
+	}
+}
+
+func TestResolveGitHubLatest_NoMatchingAsset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Release exists but the only asset is for a different OS.
+		fmt.Fprintf(w, `{"tag_name":"v0.1.0","assets":[{"name":"tau-plugin-sdd-plan9-amd64","browser_download_url":"http://x/plan9"}]}`)
+	}))
+	defer srv.Close()
+	withGithubAPIBase(t, srv.URL)
+
+	_, err := resolveGitHubLatest(context.Background(), "taucentral/sdd")
+	if err == nil {
+		t.Fatalf("expected no-matching-asset error")
+	}
+	if !strings.Contains(err.Error(), "no asset matching") {
+		t.Errorf("err = %v, want a no-matching-asset message", err)
+	}
+}
+
 // --- fetchVerifyInstall -----------------------------------------------------
 
 func TestFetchVerifyInstall_HTTPRaw(t *testing.T) {

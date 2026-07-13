@@ -627,10 +627,15 @@ func resolvePluginSource(ctx context.Context, raw string) (resolvedSource, error
 	return resolvedSource{}, fmt.Errorf("plugin install: unsupported source %q (expected HTTP(S) URL, GitHub shorthand owner/repo, or local file)", raw)
 }
 
+// githubAPIBase is the base URL for the GitHub REST API. Overridden by
+// tests to point at an httptest server; in production it is always
+// https://api.github.com.
+var githubAPIBase = "https://api.github.com"
+
 // resolveGitHubLatest hits the GitHub releases API and picks the asset
 // matching the current GOOS/GOARCH.
 func resolveGitHubLatest(ctx context.Context, shorthand string) (resolvedSource, error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", shorthand)
+	apiURL := fmt.Sprintf("%s/repos/%s/releases/latest", githubAPIBase, shorthand)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return resolvedSource{}, fmt.Errorf("plugin install: github api: %w", err)
@@ -643,6 +648,16 @@ func resolveGitHubLatest(ctx context.Context, shorthand string) (resolvedSource,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// GitHub returns 404 from /releases/latest both when the repo
+		// has no published releases and when the repo is invisible to
+		// the caller (private, or doesn't exist). Surface the most
+		// likely cause and the two workarounds instead of the raw body.
+		if resp.StatusCode == http.StatusNotFound {
+			return resolvedSource{}, fmt.Errorf(
+				"plugin install: %s has no published releases (or is private). Create a release with an asset whose name contains %q and %q, or install from a direct HTTPS URL or local path",
+				shorthand, runtime.GOOS, runtime.GOARCH,
+			)
+		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return resolvedSource{}, fmt.Errorf("plugin install: github api %s: %s", resp.Status, string(body))
 	}
