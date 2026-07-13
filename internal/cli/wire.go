@@ -36,8 +36,9 @@ const fauxModelID = "faux"
 // wiredSession is the bundle returned by wireSession: an AgentSession ready
 // to Run, plus the underlying runtime for shutdown and inspection.
 type wiredSession struct {
-	Session *tau.AgentSession
-	Runtime *tau.AgentSessionRuntime
+	Session   *tau.AgentSession
+	Runtime   *tau.AgentSessionRuntime
+	PluginMgr *tau.PluginManager // nil when zero plugins or construction error
 }
 
 // wireSession turns Args into a fully-wired AgentSession. Performs:
@@ -139,6 +140,15 @@ func wireSession(ctx context.Context, args Args) (*wiredSession, func(), error) 
 		contextWindow = defaultContextWindow
 	}
 
+	// Build the plugin manager. Returns (nil, nil) when zero plugins are
+	// discovered (short-circuit) so the runtime's plugin slot stays
+	// empty without imposing per-startup overhead. Construction errors
+	// are logged and do not block the session.
+	pluginMgr, pluginErr := buildPluginManager(ctx, cwd, settings)
+	if pluginErr != nil {
+		fmt.Fprintf(os.Stderr, "tau: plugin manager: %v\n", pluginErr)
+	}
+
 	opts := tau.SessionOptions{
 		Model:         modelID,
 		Settings:      settings,
@@ -149,6 +159,7 @@ func wireSession(ctx context.Context, args Args) (*wiredSession, func(), error) 
 		ProviderAPI:   providerAPI,
 		StateManager:  mgr, // nil OK: runtime creates a fresh owned session.
 		SessionID:     sessionID,
+		Plugins:       pluginMgr, // nil OK: zero plugins or construction error.
 	}
 	if args.Thinking != "" {
 		opts.ThinkingLevel = tau.ThinkingLevel(args.Thinking)
@@ -169,15 +180,28 @@ func wireSession(ctx context.Context, args Args) (*wiredSession, func(), error) 
 	// callers can `defer cleanup()` unconditionally. Capturing mgr into a
 	// local here keeps the closure's lifetime independent of later mutations
 	// to the variable (there are none today, but it's the right shape).
+	// When pluginMgr is non-nil, wrap the previous closure so plugin
+	// subprocesses get a bounded Shutdown after the state manager closes.
 	cleanup := func() {}
 	if mgr != nil {
 		m := mgr
 		cleanup = func() { _ = m.Close() }
 	}
+	if pluginMgr != nil {
+		pm := pluginMgr
+		inner := cleanup
+		cleanup = func() {
+			inner()
+			shutdownCtx, sc := context.WithTimeout(context.Background(), 10*time.Second)
+			defer sc()
+			_ = pm.Shutdown(shutdownCtx)
+		}
+	}
 
 	return &wiredSession{
-		Session: tau.NewAgentSession(rt),
-		Runtime: rt,
+		Session:   tau.NewAgentSession(rt),
+		Runtime:   rt,
+		PluginMgr: pluginMgr,
 	}, cleanup, nil
 }
 
@@ -368,6 +392,41 @@ func loadEffectiveSettings(ctx context.Context, cwd string) (tau.Settings, error
 		return tau.Settings{}, fmt.Errorf("load settings: %w", err)
 	}
 	return s, nil
+}
+
+// buildPluginManager constructs and spawns the plugin manager for the
+// session. Returns (nil, nil) when zero plugins are discovered so the
+// runtime's plugin slot stays empty without imposing per-startup
+// overhead. When plugins ARE present, SpawnAll is called; per-plugin
+// spawn errors are logged to stderr but do not fail the manager
+// construction (well-formed plugins still register their tools).
+func buildPluginManager(ctx context.Context, cwd string, settings tau.Settings) (*tau.PluginManager, error) {
+	dirs, err := tau.PluginsDir(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("resolve plugin dirs: %w", err)
+	}
+	globalDir := dirs[0]
+	var projectDir string
+	if len(dirs) > 1 {
+		projectDir = dirs[1]
+	}
+	hostSrv := newPluginsHostServer(os.Stderr, settings)
+	mgr, err := tau.NewPluginManager(projectDir, globalDir, hostSrv)
+	if err != nil {
+		return nil, err
+	}
+	// Short-circuit: when nothing is on disk, return nil so the runtime
+	// skips plugin tool registration entirely.
+	paths, _ := mgr.Discover()
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if _, err := mgr.SpawnAll(ctx); err != nil {
+		// Log the first spawn error but keep going; other plugins may
+		// still have spawned successfully.
+		fmt.Fprintf(os.Stderr, "tau: plugin spawn: %v\n", err)
+	}
+	return mgr, nil
 }
 
 // loadModelsFile reads <agentDir>/models.json. Missing file → empty ModelsFile.

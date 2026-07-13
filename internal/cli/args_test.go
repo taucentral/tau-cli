@@ -113,7 +113,7 @@ func TestParseArgs_BooleanFlags(t *testing.T) {
 		flag string
 	}{
 		{"--offline"}, {"--no-setup"}, {"--rpc"}, {"--continue"},
-		{"--no-session"}, {"--fork"}, {"--list-models"},
+		{"--no-session"}, {"--fork"}, {"--list-models"}, {"--print-tools"},
 		{"--version"}, {"--help"}, {"-h"},
 	}
 	for _, c := range cases {

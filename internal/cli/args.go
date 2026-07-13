@@ -83,6 +83,10 @@ type Args struct {
 	// ListModels requests --list-models output.
 	ListModels bool
 
+	// PrintTools requests --print-tools output: list built-in and plugin
+	// tools as a table, then exit.
+	PrintTools bool
+
 	// Export writes the session transcript to the given path on exit.
 	Export string
 
@@ -104,7 +108,7 @@ func ParseArgs(argv []string) (Args, error) {
 	// Recognize subcommands first. A subcommand consumes the rest of argv.
 	if len(argv) > 0 {
 		switch argv[0] {
-		case "config", "update":
+		case "config", "update", "plugin":
 			args.Subcommand = argv[0]
 			args.SubcommandArgs = argv[1:]
 			return args, nil
@@ -157,6 +161,9 @@ func ParseArgs(argv []string) (Args, error) {
 			i++
 		case tok == "--list-models":
 			args.ListModels = true
+			i++
+		case tok == "--print-tools":
+			args.PrintTools = true
 			i++
 		case strings.HasPrefix(tok, "--"):
 			// long flag with optional =value

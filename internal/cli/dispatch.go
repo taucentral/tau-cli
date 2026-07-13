@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/taucentral/tau-cli/internal/interactivemode"
 	"github.com/taucentral/tau/pkg/tau/modes"
@@ -49,6 +50,10 @@ func Dispatch(ctx context.Context, args Args) error {
 
 	if args.ListModels {
 		return listModels(ctx, args)
+	}
+
+	if args.PrintTools {
+		return runPrintTools(ctx, args)
 	}
 
 	// First-run setup wizard. Only runs for session-bearing modes; the
@@ -95,6 +100,8 @@ func dispatchSubcommand(ctx context.Context, args Args) error {
 		return runConfigSubcommand(ctx, args)
 	case "update":
 		return runUpdateSubcommand(ctx, args)
+	case "plugin":
+		return runPluginSubcommand(ctx, args)
 	default:
 		return fmt.Errorf("unknown subcommand %q", args.Subcommand)
 	}
@@ -113,6 +120,7 @@ Usage:
 Subcommands:
   config                        Open settings (use --path to print the path only)
   update                        Self-update
+  plugin                        Install, list, remove, or update plugins
 
 Modes:
   --print                       Non-interactive single-turn (text to stdout)
@@ -134,6 +142,7 @@ Flags:
   --no-session                  Run without persisting state to disk
   --no-setup                    Skip first-run setup wizard
   --list-models                 List available models and exit
+  --print-tools                 List built-in and plugin tools, then exit
   --export <path>               Write the transcript to <path> on exit
   --version                     Print version and exit
   --help, -h                    Print this help and exit
@@ -219,4 +228,61 @@ func runInteractive(ctx context.Context, args Args) error {
 		return err
 	}
 	return nil
+}
+
+// runPrintTools handles `tau --print-tools`. It wires the session (so
+// plugin tools are discovered and spawned), then dumps the merged tool
+// registry as a SOURCE/NAME/DESCRIPTION table and exits. The table is
+// tab-delimited for easy parsing; a human-friendly columnated view is
+// produced by the tabwriter padding.
+func runPrintTools(ctx context.Context, args Args) error {
+	wired, cleanup, err := wireSession(ctx, args)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	defer func() { _ = wired.Session.Shutdown(ctx) }()
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SOURCE\tNAME\tDESCRIPTION")
+
+	// Built-in tools from the runtime's Options.
+	rt := wired.Session.Runtime()
+	for _, tool := range rt.Options.BuiltinTools {
+		fmt.Fprintf(tw, "builtin\t%s\t%s\n", tool.Name(), truncateToolDesc(tool.Description()))
+	}
+
+	// Plugin tools from the manager (nil when zero plugins discovered).
+	if wired.PluginMgr != nil {
+		for _, tool := range wired.PluginMgr.Tools() {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n",
+				pluginSourceFromName(tool.Name()),
+				tool.Name(),
+				truncateToolDesc(tool.Description()),
+			)
+		}
+	}
+
+	return tw.Flush()
+}
+
+// pluginSourceFromName derives the plugin short name from a namespaced
+// tool name (e.g. "minimal.echo" → "minimal"). Returns the full name
+// when no dot is present.
+func pluginSourceFromName(name string) string {
+	if idx := strings.IndexByte(name, '.'); idx >= 0 {
+		return name[:idx]
+	}
+	return name
+}
+
+// truncateToolDesc collapses newlines and caps the description length so
+// the table stays readable on an 80-column terminal.
+func truncateToolDesc(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	const maxLen = 80
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-1] + "…"
 }

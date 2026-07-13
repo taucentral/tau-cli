@@ -13,10 +13,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tau "github.com/taucentral/tau/pkg/tau"
 )
@@ -469,4 +472,109 @@ func TestWireSession_FreshSession_CleanupIsNoOp(t *testing.T) {
 	// Calling cleanup must not panic and must be idempotent.
 	cleanup()
 	cleanup()
+}
+
+// TestBuildPluginManager verifies buildPluginManager's three code paths:
+//   - Zero plugins on disk → returns (nil, nil) so the runtime skips
+//     plugin tool registration.
+//   - One good plugin → non-nil manager whose Tools() includes the
+//     minimal plugin's echo, fail, and log tools.
+//   - One broken plugin → non-nil manager (Discover found it) but
+//     SpawnAll failed; Tools() is empty and the error was logged.
+func TestBuildPluginManager(t *testing.T) {
+	t.Run("ZeroPlugins_ReturnsNil", func(t *testing.T) {
+		withConfigDir(t)
+		cwd := t.TempDir()
+		settings := tau.DefaultSettings()
+
+		mgr, err := buildPluginManager(context.Background(), cwd, settings)
+		if err != nil {
+			t.Fatalf("buildPluginManager: %v", err)
+		}
+		if mgr != nil {
+			t.Errorf("mgr = %T, want nil for zero plugins", mgr)
+		}
+	})
+
+	t.Run("OneGoodPlugin_ToolsRegistered", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skipping plugin build test in -short mode")
+		}
+		configDir := withConfigDir(t)
+		cwd := t.TempDir()
+
+		// Build the minimal plugin from the tau module's testdata.
+		// The replace directive in go.mod makes the import path resolvable.
+		pluginsDir := filepath.Join(configDir, "plugins")
+		if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+			t.Fatalf("mkdir plugins: %v", err)
+		}
+		binPath := filepath.Join(pluginsDir, "tau-plugin-minimal")
+		buildCmd := exec.Command("go", "build", "-o="+binPath,
+			"github.com/taucentral/tau/internal/plugins/testdata/minimalplugin")
+		if out, err := buildCmd.CombinedOutput(); err != nil {
+			t.Fatalf("go build minimalplugin: %v\n%s", err, out)
+		}
+		_ = os.Chmod(binPath, 0o755)
+
+		settings := tau.DefaultSettings()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		mgr, err := buildPluginManager(ctx, cwd, settings)
+		if err != nil {
+			t.Fatalf("buildPluginManager: %v", err)
+		}
+		if mgr == nil {
+			t.Fatal("mgr = nil, want non-nil for one good plugin")
+		}
+		defer func() {
+			shutdownCtx, sc := context.WithTimeout(context.Background(), 10*time.Second)
+			defer sc()
+			_ = mgr.Shutdown(shutdownCtx)
+		}()
+		tools := mgr.Tools()
+		if len(tools) != 3 {
+			names := make([]string, len(tools))
+			for i, tl := range tools {
+				names[i] = tl.Name()
+			}
+			t.Fatalf("expected 3 tools (echo, fail, log), got %d: %v", len(tools), names)
+		}
+	})
+
+	t.Run("BrokenPlugin_ReturnsManagerWithNoTools", func(t *testing.T) {
+		configDir := withConfigDir(t)
+		cwd := t.TempDir()
+
+		// Write a broken "plugin" that exits 1 immediately. go-plugin's
+		// handshake will fail; SpawnAll records the error and continues.
+		pluginsDir := filepath.Join(configDir, "plugins")
+		if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+			t.Fatalf("mkdir plugins: %v", err)
+		}
+		brokenPath := filepath.Join(pluginsDir, "tau-plugin-broken")
+		if err := os.WriteFile(brokenPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatalf("write broken plugin: %v", err)
+		}
+
+		settings := tau.DefaultSettings()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		mgr, err := buildPluginManager(ctx, cwd, settings)
+		if err != nil {
+			t.Fatalf("buildPluginManager should not return error for spawn failure: %v", err)
+		}
+		if mgr == nil {
+			t.Fatal("mgr = nil, want non-nil (Discover found a plugin)")
+		}
+		defer func() {
+			shutdownCtx, sc := context.WithTimeout(context.Background(), 10*time.Second)
+			defer sc()
+			_ = mgr.Shutdown(shutdownCtx)
+		}()
+		// Broken plugin failed to spawn; no tools registered.
+		if tools := mgr.Tools(); len(tools) != 0 {
+			t.Errorf("expected 0 tools for broken plugin, got %d", len(tools))
+		}
+	})
 }
